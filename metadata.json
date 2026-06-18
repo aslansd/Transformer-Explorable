@@ -1,0 +1,6 @@
+{
+  "name": "Transformer Explorable",
+  "description": "An interactive, playable guide to understanding the Transformer architecture, embeddings, and self-attention using Nicky Case design principles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
