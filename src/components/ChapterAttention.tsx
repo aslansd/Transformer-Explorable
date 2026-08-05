@@ -1,183 +1,158 @@
-import React, { useState } from "react";
-import { HelpCircle, ChevronRight, CheckCircle, RefreshCw, Zap } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { useMemo, useState } from "react";
+import { Zap } from "lucide-react";
+import { motion } from "motion/react";
+import { attentionRow, toPercentages, D_K } from "../lib/nn";
 
 interface MatchWord {
   text: string;
-  queryScore: number; // Simulated query fit for active intent
-  keyScore: number;   // Simulated key weight
-  value: string;      // The actual semantic cargo
+  /** Raw dot product q_it · k_word, before scaling. Illustrative numbers. */
+  score: number;
+  /** What this word would contribute if it were attended to. */
+  value: string;
 }
+
+const TIRED_WORDS: MatchWord[] = [
+  { text: "The", score: 8, value: "[Article]" },
+  { text: "animal", score: 44, value: "[Animate entity: mammal]" },
+  { text: "did not", score: 10, value: "[Negation]" },
+  { text: "cross", score: 16, value: "[Movement]" },
+  { text: "the", score: 6, value: "[Article]" },
+  { text: "street", score: 26, value: "[Road infrastructure]" },
+  { text: "because", score: 12, value: "[Causal connector]" },
+  { text: "it", score: 18, value: "[Pronoun, unresolved]" },
+  { text: "was", score: 9, value: "[Copula]" },
+  { text: "tired", score: 32, value: "[Biological state: needs rest]" },
+];
+
+const WIDE_WORDS: MatchWord[] = [
+  { text: "The", score: 8, value: "[Article]" },
+  { text: "animal", score: 24, value: "[Animate entity: mammal]" },
+  { text: "did not", score: 10, value: "[Negation]" },
+  { text: "cross", score: 16, value: "[Movement]" },
+  { text: "the", score: 6, value: "[Article]" },
+  { text: "street", score: 45, value: "[Road infrastructure]" },
+  { text: "because", score: 12, value: "[Causal connector]" },
+  { text: "it", score: 18, value: "[Pronoun, unresolved]" },
+  { text: "was", score: 9, value: "[Copula]" },
+  { text: "too wide", score: 31, value: "[Spatial dimension: broad]" },
+];
+
+type Step = "idle" | "project" | "similarity" | "softmax" | "mix";
+
+const STEPS: { id: Step; label: string }[] = [
+  { id: "idle", label: "0. Reset" },
+  { id: "project", label: "1. Make Q, K, V" },
+  { id: "similarity", label: "2. Score (Q·Kᵀ)" },
+  { id: "softmax", label: "3. Scale + softmax" },
+  { id: "mix", label: "4. Blend the Values" },
+];
 
 export default function ChapterAttention() {
   const [activeSentence, setActiveSentence] = useState<"tired" | "wide">("tired");
-  const [calculationStep, setCalculationStep] = useState<"idle" | "similarity" | "softmax" | "mix">("idle");
+  const [step, setStep] = useState<Step>("idle");
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
 
-  // Set up details for Sentence 1 ("tired" -> animal)
-  const tiredWords: MatchWord[] = [
-    { text: "The", queryScore: 0, keyScore: 10, value: "[Article]" },
-    { text: "animal", queryScore: 10, keyScore: 92, value: "[Animate Entity: Mammal]" },
-    { text: "did not", queryScore: 0, keyScore: 15, value: "[Negative Action]" },
-    { text: "cross", queryScore: 0, keyScore: 30, value: "[Movement]" },
-    { text: "the", queryScore: 0, keyScore: 5, value: "[Article]" },
-    { text: "street", queryScore: 0, keyScore: 40, value: "[Physical Road Infrastructure]" },
-    { text: "because", queryScore: 0, keyScore: 50, value: "[Causal Connector]" },
-    { text: "it", queryScore: 95, keyScore: 10, value: "[Subject Pronoun Reference]" },
-    { text: "was", queryScore: 0, keyScore: 10, value: "[Verbal Copula]" },
-    { text: "tired", queryScore: 85, keyScore: 88, value: "[Biological State: Needs rest]" }
-  ];
+  const words = activeSentence === "tired" ? TIRED_WORDS : WIDE_WORDS;
+  const targetWord = activeSentence === "tired" ? "animal" : "street";
 
-  // Set up details for Sentence 2 ("wide" -> street)
-  const wideWords: MatchWord[] = [
-    { text: "The", queryScore: 0, keyScore: 10, value: "[Article]" },
-    { text: "animal", queryScore: 0, keyScore: 14, value: "[Animate Entity: Mammal]" },
-    { text: "did not", queryScore: 0, keyScore: 15, value: "[Negative Action]" },
-    { text: "cross", queryScore: 0, keyScore: 30, value: "[Movement]" },
-    { text: "the", queryScore: 0, keyScore: 5, value: "[Article]" },
-    { text: "street", queryScore: 10, keyScore: 94, value: "[Physical Road Infrastructure]" },
-    { text: "because", queryScore: 0, keyScore: 50, value: "[Causal Connector]" },
-    { text: "it", queryScore: 95, keyScore: 10, value: "[Subject Pronoun Reference]" },
-    { text: "was", queryScore: 0, keyScore: 10, value: "[Verbal Copula]" },
-    { text: "wide", queryScore: 80, keyScore: 90, value: "[Spatial Dimension: Broad]" }
-  ];
-
-  const words = activeSentence === "tired" ? tiredWords : wideWords;
-
-  // Let's compute simulated attention weights of "it" (index 7) paid to all others
-  // In Sentence 1 ("tired"), "it" queries "animal" strongly because "tired" is biologic.
-  // In Sentence 2 ("wide"), "it" queries "street" strongly because "wide" is spatial.
-  const getAttentionWeights = (): Record<string, { similarity: number; softmax: number }> => {
-    if (activeSentence === "tired") {
-      return {
-        "The": { similarity: 12, softmax: 2 },
-        "animal": { similarity: 88, softmax: 78 },
-        "did not": { similarity: 10, softmax: 1 },
-        "cross": { similarity: 20, softmax: 3 },
-        "the": { similarity: 8, softmax: 1 },
-        "street": { similarity: 35, softmax: 10 },
-        "because": { similarity: 15, softmax: 2 },
-        "it": { similarity: 20, softmax: 2 },
-        "was": { similarity: 10, softmax: 1 },
-        "tired": { similarity: 55, softmax: 5 } // attention to active modifier itself has some score
-      };
-    } else {
-      return {
-        "The": { similarity: 10, softmax: 2 },
-        "animal": { similarity: 32, softmax: 8 },
-        "did not": { similarity: 12, softmax: 1 },
-        "cross": { similarity: 25, softmax: 3 },
-        "the": { similarity: 9, softmax: 1 },
-        "street": { similarity: 90, softmax: 80 },
-        "because": { similarity: 14, softmax: 2 },
-        "it": { similarity: 20, softmax: 2 },
-        "was": { similarity: 10, softmax: 1 },
-        "wide": { similarity: 50, softmax: 5 }
-      };
-    }
-  };
-
-  const weights = getAttentionWeights();
+  // Real softmax over the scaled scores — no hand-typed percentages that fail to sum to 100.
+  const percents = useMemo(
+    () => toPercentages(attentionRow(words.map((w) => w.score))),
+    [words],
+  );
+  const percentFor = (text: string) => percents[words.findIndex((w) => w.text === text)] ?? 0;
+  const targetPercent = percentFor(targetWord);
+  const total = percents.reduce((a, b) => a + b, 0);
 
   return (
     <div className="space-y-6">
-      {/* Explanation Header Card */}
+      {/* Explanation header */}
       <div className="bg-amber-50 border-2 border-amber-200/60 rounded-2xl p-5 shadow-sm space-y-4">
         <h4 className="font-display font-bold text-amber-900 text-lg flex items-center gap-2">
-          🎯 The Core Matchmaker (Self-Attention)
+          🎯 The Matchmaker (Self-Attention)
         </h4>
         <div className="text-sm text-stone-700 space-y-3 leading-relaxed">
           <p>
-            Self-attention is the heart of the Transformer. To let words exchange context, every word is outfitted with three vectors like a library matchmaking system:
+            Every word's vector gets multiplied by three <em>learned</em> matrices — W
+            <sub>Q</sub>, W<sub>K</sub>, W<sub>V</sub> — producing three different views of that
+            same word:
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs pt-1">
             <div className="bg-white p-3 rounded-xl border border-stone-200">
               <span className="font-bold text-rose-500 block">🔍 Query (Q)</span>
-              <span>"What is my pronoun (or context) looking for?"</span>
+              <span>"What am I looking for in this sentence?"</span>
             </div>
             <div className="bg-white p-3 rounded-xl border border-stone-200">
               <span className="font-bold text-blue-500 block">🏷️ Key (K)</span>
-              <span>"What attributes do I have to offer?"</span>
+              <span>"What do I advertise about myself?"</span>
             </div>
             <div className="bg-white p-3 rounded-xl border border-stone-200">
               <span className="font-bold text-emerald-500 block">📦 Value (V)</span>
-              <span>"Who am I actually inside once selected?"</span>
+              <span>"What do I actually hand over if you pick me?"</span>
             </div>
           </div>
           <p>
-            By matching Queries with Keys, we calculate how much attention they must pay to one another.
+            Every word compares its Query against every Key, turns those scores into
+            percentages, and rebuilds itself as a weighted blend of everyone's Values. Below we
+            follow just one word — the pronoun{" "}
+            <span className="font-bold text-rose-600">it</span> — but this happens for all ten
+            words at once, in one matrix multiplication.
           </p>
         </div>
       </div>
 
-      {/* Main Interactive simulation body */}
+      {/* Simulation */}
       <div className="bg-white border-2 border-stone-200 rounded-2xl p-6 shadow-sm space-y-6">
-        
-        {/* Toggle options */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
             <h4 className="font-display font-semibold text-stone-900 text-base">
-              Interactive Matchmaker: Pronoun Resolution
+              Interactive matchmaker: pronoun resolution
             </h4>
             <p className="text-xs text-stone-500">
-              Choose a context. Watch how changing the adjective at the end completely flips the meaning of "it"!
+              One word at the end changes — and "it" points at something completely different.
             </p>
           </div>
 
-          <div className="flex items-center gap-2 bg-stone-100 p-1 border border-stone-200 rounded-xl relative z-10 shrink-0">
-            <button
-              onClick={() => {
-                setActiveSentence("tired");
-                setCalculationStep("idle");
-              }}
-              className={`text-xs px-3.5 py-1.5 rounded-lg font-medium transition-all ${
-                activeSentence === "tired"
-                  ? "bg-white text-stone-900 shadow-sm"
-                  : "text-stone-500 hover:text-stone-900"
-              }`}
-            >
-              "...it was tired"
-            </button>
-            <button
-              onClick={() => {
-                setActiveSentence("wide");
-                setCalculationStep("idle");
-              }}
-              className={`text-xs px-3.5 py-1.5 rounded-lg font-medium transition-all ${
-                activeSentence === "wide"
-                  ? "bg-white text-stone-900 shadow-sm"
-                  : "text-stone-500 hover:text-stone-900"
-              }`}
-            >
-              "...it was too wide"
-            </button>
+          <div className="flex items-center gap-2 bg-stone-100 p-1 border border-stone-200 rounded-xl shrink-0">
+            {(["tired", "wide"] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => {
+                  setActiveSentence(s);
+                  setStep("idle");
+                }}
+                aria-pressed={activeSentence === s}
+                className={`text-xs px-3.5 py-1.5 rounded-lg font-medium transition-all ${
+                  activeSentence === s
+                    ? "bg-white text-stone-900 shadow-sm"
+                    : "text-stone-500 hover:text-stone-900"
+                }`}
+              >
+                {s === "tired" ? '"…it was tired"' : '"…it was too wide"'}
+              </button>
+            ))}
           </div>
         </div>
 
-        {/* Visual Attention web block */}
-        <div className="bg-stone-50 border border-stone-200 rounded-xl p-6 flex flex-col items-center justify-center min-h-[180px] relative overflow-hidden">
-          
-          {/* Visual connections list */}
+        {/* Attention web */}
+        <div className="bg-stone-50 border border-stone-200 rounded-xl p-6 pb-14 flex flex-col items-center justify-center min-h-[180px] relative">
           <div className="flex flex-wrap justify-center gap-2 md:gap-3.5 relative z-10 w-full max-w-2xl">
             {words.map((item) => {
-              const matchesTarget = (activeSentence === "tired" && item.text === "animal") || 
-                                    (activeSentence === "wide" && item.text === "street");
               const isPronoun = item.text === "it";
-              
-              // Compute visual scale/strength based on active calculations
-              let connectionOpacity = 0.15;
-              let connectionColor = "border-stone-200 text-stone-700";
-              const weight = weights[item.text] || { similarity: 0, softmax: 0 };
+              const isTarget = item.text === targetWord;
+              const pct = percentFor(item.text);
 
-              if (calculationStep === "similarity") {
-                connectionOpacity = 0.2 + (weight.similarity / 140);
-                if (matchesTarget) connectionColor = "border-amber-300 bg-amber-50 text-amber-900 ring-1 ring-amber-200/50";
-              } else if (calculationStep === "softmax" || calculationStep === "mix") {
-                connectionOpacity = 0.1 + (weight.softmax / 100);
-                if (matchesTarget) {
-                  connectionColor = "border-rose-400 bg-rose-50 text-rose-900 ring-2 ring-rose-400/30 scale-105 shadow-md";
-                }
-              }
+              // Dim non-participants, but never below readable contrast.
+              let opacity = 1;
+              if (step === "similarity") opacity = 0.45 + item.score / 90;
+              if (step === "softmax" || step === "mix") opacity = 0.4 + pct / 140;
+
+              const highlight =
+                isTarget && step === "similarity"
+                  ? "border-amber-400 bg-amber-50 text-amber-900 ring-1 ring-amber-200"
+                  : isTarget && (step === "softmax" || step === "mix")
+                    ? "border-rose-400 bg-rose-50 text-rose-900 ring-2 ring-rose-400/30 shadow-md"
+                    : "bg-white border-stone-200 text-stone-700";
 
               return (
                 <motion.div
@@ -185,45 +160,41 @@ export default function ChapterAttention() {
                   layout
                   onMouseEnter={() => setHoveredNode(item.text)}
                   onMouseLeave={() => setHoveredNode(null)}
-                  className={`px-2.5 py-2 rounded-xl text-[11px] md:text-xs font-semibold select-none transition-all duration-300 relative ${
-                    isPronoun 
-                      ? "bg-rose-500 text-white shadow ring-2 ring-rose-300 scale-105 z-20 cursor-pointer" 
-                      : `bg-white border border-stone-200 hover:border-stone-400 text-stone-700`
+                  className={`px-2.5 py-2 rounded-xl text-[11px] md:text-xs font-semibold select-none transition-all duration-300 relative border ${
+                    isPronoun
+                      ? "bg-rose-500 text-white border-rose-600 shadow ring-2 ring-rose-300 z-20 cursor-help"
+                      : highlight
                   }`}
-                  style={{
-                    opacity: isPronoun ? 1 : connectionOpacity
-                  }}
+                  style={{ opacity: isPronoun ? 1 : Math.min(1, opacity) }}
                   id={`attention-node-${item.text}`}
                 >
                   <div>{item.text}</div>
-                  
-                  {/* Floating index tags */}
-                  {calculationStep !== "idle" && !isPronoun && (
-                    <motion.div 
-                      initial={{ scale: 0.8 }} 
-                      className="text-[9px] font-mono mt-1 text-stone-400"
-                    >
-                      {calculationStep === "similarity" ? `Score: ${weight.similarity}` : `Softmax: ${weight.softmax}%`}
-                    </motion.div>
-                  )}
 
-                  {/* Visual rays connecting IT to targets */}
-                  {isPronoun && calculationStep !== "idle" && (
-                    <div className="absolute inset-x-0 -bottom-4 flex justify-center pointer-events-none">
-                      <motion.div 
-                        animate={{ y: [0, 4, 0] }}
-                        transition={{ repeat: Infinity, duration: 1.2 }}
-                        className="w-1.5 h-1.5 rounded-full bg-rose-500" 
-                      />
+                  {step !== "idle" && step !== "project" && !isPronoun && (
+                    <div className="text-[9px] font-mono mt-1 opacity-80">
+                      {step === "similarity"
+                        ? `q·k = ${item.score}`
+                        : `${percentFor(item.text)}%`}
                     </div>
                   )}
 
-                  {/* Tooltip detail hover details */}
+                  {step === "project" && (
+                    <div className="text-[8px] font-mono mt-1 flex gap-1 justify-center opacity-90">
+                      <span className="text-rose-500">q</span>
+                      <span className="text-blue-500">k</span>
+                      <span className="text-emerald-600">v</span>
+                    </div>
+                  )}
+
                   {hoveredNode === item.text && (
-                    <div className="absolute top-10 left-1/2 transform -translate-x-1/2 z-40 bg-stone-900 text-white p-2.5 rounded-lg shadow-xl min-w-[150px] pointer-events-none text-[10px] space-y-1 font-mono">
-                      <p className="font-bold border-b border-stone-800 pb-1 text-amber-400">"{item.text}"</p>
+                    <div className="absolute top-full mt-1 left-1/2 -translate-x-1/2 z-40 bg-stone-900 text-white p-2.5 rounded-lg shadow-xl min-w-[160px] pointer-events-none text-[10px] space-y-1 font-mono">
+                      <p className="font-bold border-b border-stone-700 pb-1 text-amber-400">
+                        "{item.text}"
+                      </p>
                       <p className="text-stone-300">Value: {item.value}</p>
-                      <p className="text-stone-400">Key Weight: {item.keyScore}</p>
+                      <p className="text-stone-400">
+                        raw q·k: {item.score} → weight {percentFor(item.text)}%
+                      </p>
                     </div>
                   )}
                 </motion.div>
@@ -231,85 +202,116 @@ export default function ChapterAttention() {
             })}
           </div>
 
-          {/* Background visuals showing matchmaking flow graph */}
-          {calculationStep === "mix" && (
-            <div className="absolute bottom-1 bg-rose-500/10 border border-rose-500/30 rounded-xl px-3 py-1.5 text-[10px] font-mono text-rose-700 flex items-center gap-1.5 animate-bounce z-10">
-              <Zap size={11} /> Meaning Blended: Pronoun "it" resolves as &quot;{activeSentence === "tired" ? "Animal" : "Street"}&quot; of next layer!
+          {(step === "softmax" || step === "mix") && (
+            <div className="absolute bottom-3 text-[10px] font-mono text-stone-500 bg-white border border-stone-200 rounded-lg px-2.5 py-1">
+              attention weights sum to {total}% ✓
+            </div>
+          )}
+
+          {step === "mix" && (
+            <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 bg-rose-500/10 border border-rose-500/30 rounded-xl px-3 py-1.5 text-[10px] font-mono text-rose-700 flex items-center gap-1.5 z-20 whitespace-nowrap">
+              <Zap size={11} /> "it" now carries {targetPercent}% of "{targetWord}"
             </div>
           )}
         </div>
 
-        {/* Calculation Stage timeline controllers */}
+        {/* Steps */}
         <div className="bg-stone-50 border border-stone-200/50 p-4 rounded-xl space-y-4">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
               <h5 className="text-xs font-semibold text-stone-800">
-                Mathematics Walkthrough: Calculate attention step-by-step
+                Walkthrough: one attention head, step by step
               </h5>
               <p className="text-[10px] text-stone-500">
-                Play through Dot-product, Softmax filtering, and Vector Blending.
+                Attention(Q, K, V) = softmax(QKᵀ / √d<sub>k</sub>) · V
               </p>
             </div>
 
-            {/* Stepper Buttons */}
             <div className="flex flex-wrap gap-1.5 shrink-0">
-              <button
-                onClick={() => setCalculationStep("idle")}
-                className={`text-xs px-2.5 py-1.5 rounded-lg border font-medium ${
-                  calculationStep === "idle" ? "bg-stone-900 text-white border-stone-900" : "bg-white hover:bg-stone-100 text-stone-600 border-stone-200"
-                }`}
-              >
-                1. Reset
-              </button>
-              <button
-                onClick={() => setCalculationStep("similarity")}
-                className={`text-xs px-2.5 py-1.5 rounded-lg border font-medium flex items-center gap-1 ${
-                  calculationStep === "similarity" ? "bg-stone-900 text-white border-stone-900 animate-pulse" : "bg-white hover:bg-stone-100 text-stone-600 border-stone-200"
-                }`}
-              >
-                2. Dot Product (Similarity)
-              </button>
-              <button
-                onClick={() => setCalculationStep("softmax")}
-                className={`text-xs px-2.5 py-1.5 rounded-lg border font-medium ${
-                  calculationStep === "softmax" ? "bg-stone-900 text-white border-stone-900" : "bg-white hover:bg-stone-100 text-stone-600 border-stone-200"
-                }`}
-              >
-                3. Softmax filter
-              </button>
-              <button
-                onClick={() => setCalculationStep("mix")}
-                className={`text-xs px-2.5 py-1.5 rounded-lg border font-medium ${
-                  calculationStep === "mix" ? "bg-stone-900 text-white border-stone-900" : "bg-white hover:bg-stone-100 text-stone-600 border-stone-200"
-                }`}
-              >
-                4. Value Blending
-              </button>
+              {STEPS.map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => setStep(s.id)}
+                  aria-pressed={step === s.id}
+                  className={`text-xs px-2.5 py-1.5 rounded-lg border font-medium transition-colors ${
+                    step === s.id
+                      ? "bg-stone-900 text-white border-stone-900"
+                      : "bg-white hover:bg-stone-100 text-stone-600 border-stone-200"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
             </div>
           </div>
 
-          {/* Simple code block or description explaining mathematical matches */}
-          <div className="bg-white p-3.5 rounded-lg border border-stone-200 font-mono text-[11px] text-stone-600 leading-relaxed">
-            {calculationStep === "idle" && (
-              <p>🌱 State: The pronoun <span className="font-bold underline text-rose-500">it</span> needs context. Click **Step 2 (Dot Product)** to cast the Query vector and check similarity with all word Keys!</p>
+          <div className="bg-white p-3.5 rounded-lg border border-stone-200 text-[11px] text-stone-600 leading-relaxed space-y-2">
+            {step === "idle" && (
+              <p>
+                🌱 The pronoun <span className="font-bold text-rose-500">it</span> arrives with
+                no idea what it refers to. Walk through the four steps to watch it find out.
+              </p>
             )}
-            {calculationStep === "similarity" && (
-              <p>🔍 Dot Product: $Similarity(Q, K) = Q \cdot K^T$. We test how well the Query fits every word Key. 
-              {activeSentence === "tired" ? (
-                <span> The word <span className="text-amber-600 font-bold">animal</span> fits the "tired" query perfectly because it's animate! Similarity score is 88.</span>
-              ) : (
-                <span> The word <span className="text-amber-600 font-bold">street</span> fits the "wide" query perfectly because streets are broad assets! Similarity score is 90.</span>
-              )}</p>
+
+            {step === "project" && (
+              <p>
+                🧩 <strong>Project.</strong> Multiply every word vector by the three learned
+                matrices: q = xW<sub>Q</sub>, k = xW<sub>K</sub>, v = xW<sub>V</sub>. Same word,
+                three roles. These matrices are the part that actually gets <em>trained</em> —
+                everything after this is fixed arithmetic.
+              </p>
             )}
-            {calculationStep === "softmax" && (
-              <p>🎚️ Softmax Filtering: Softmax(x_i) = exp(x_i) / Sum( exp(x_j) ). Softmax squashes scores into probability distributions. It exponentializes matches, amplifying high scores and making weak connections practically vanish. {activeSentence === "tired" ? "Animal gets boosted to 78% attention weight" : "Street gets boosted to 80% weight"}!</p>
+
+            {step === "similarity" && (
+              <p>
+                🔍 <strong>Score.</strong> Take the dot product of{" "}
+                <span className="font-bold text-rose-500">it</span>'s query with every word's
+                key. A big dot product means "these two point the same way".{" "}
+                {activeSentence === "tired" ? (
+                  <>
+                    Because the sentence ends in <em>tired</em>, the query that "it" emits is
+                    looking for something that can <em>be</em> tired — and{" "}
+                    <span className="text-amber-600 font-bold">animal</span> scores highest (44).
+                  </>
+                ) : (
+                  <>
+                    Because the sentence ends in <em>too wide</em>, the query is looking for
+                    something with a width — and{" "}
+                    <span className="text-amber-600 font-bold">street</span> scores highest (45).
+                  </>
+                )}
+              </p>
             )}
-            {calculationStep === "mix" && (
-              <p>🧬 Value Blending: Attention(Q, K, V) = Softmax( Q * K^T / sqrt(d_k) ) * V. We blend all word Value coordinates by their attention weight distribution. The resulting output vector for "it" is now 75%+ enriched with the exact meaning and context of "{activeSentence === "tired" ? "animal" : "street"}"! Truly magical.</p>
+
+            {step === "softmax" && (
+              <>
+                <p>
+                  🎚️ <strong>Scale, then softmax.</strong> First divide every score by √d
+                  <sub>k</sub> = √{D_K} = {Math.sqrt(D_K)}. Without that, large dot products push
+                  softmax into a region where its gradients nearly vanish and training stalls.
+                </p>
+                <p>
+                  Then softmax(x)<sub>i</sub> = e^x<sub>i</sub> / Σ e^x<sub>j</sub> turns the
+                  scores into a probability distribution: everything positive, everything summing
+                  to 100%. Exponentiating exaggerates the gaps, so{" "}
+                  <span className="font-bold">{targetWord}</span> takes {targetPercent}% while
+                  the articles get about 1% each.
+                </p>
+              </>
+            )}
+
+            {step === "mix" && (
+              <p>
+                🧬 <strong>Blend.</strong> Multiply each word's Value vector by its weight and
+                add them all up. The output for "it" is {targetPercent}% "{targetWord}" plus
+                traces of everything else. Note what leaves this step: not a word, but a{" "}
+                <em>vector</em> — a version of "it" that has absorbed its referent. It then goes
+                through a residual connection, layer normalisation and a feed-forward network
+                before the next layer of attention gets its turn.
+              </p>
             )}
           </div>
         </div>
-
       </div>
     </div>
   );
