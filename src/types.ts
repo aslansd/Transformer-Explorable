@@ -1,4 +1,10 @@
-export type ChapterId = 'intro' | 'embeddings' | 'position' | 'attention' | 'multihead' | 'sandbox';
+export type ChapterId =
+  | 'intro'
+  | 'embeddings'
+  | 'position'
+  | 'attention'
+  | 'multihead'
+  | 'sandbox';
 
 export interface Token {
   id: string;
@@ -8,15 +14,26 @@ export interface Token {
 
 export interface WordVector {
   word: string;
-  x: number; // 2D layout representation (-100 to 100)
+  /** Toy 2-D layout coordinate, -100 to 100. X = femininity, Y = royalty. */
+  x: number;
   y: number;
-  category: 'animal' | 'royal' | 'furniture' | 'verb' | 'adjective' | 'pronoun' | 'location';
+  category:
+    | 'animal'
+    | 'royal'
+    | 'person'
+    | 'furniture'
+    | 'verb'
+    | 'adjective'
+    | 'pronoun'
+    | 'location';
 }
 
 export interface AttentionHead {
   id: number;
   name: string;
   description: string;
-  color: string; // Tailwind color name like 'amber' or 'rose'
-  focusType: string; // What syntactic relation it looks for
+  /** Tailwind colour family, e.g. 'pink' or 'sky'. */
+  color: string;
+  /** A human-readable summary of the relation this head happens to track. */
+  focusType: string;
 }
